@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Remote Agent Viewer</title>
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d9;height:100vh;display:flex;flex-direction:column;overflow:hidden}
+#topbar{display:flex;align-items:center;gap:12px;padding:8px 16px;background:#161b22;border-bottom:1px solid #30363d;font-size:13px;flex-shrink:0}
+#topbar h1{font-size:15px;font-weight:600}
+#topbar h1 span{color:#58a6ff}
+#status{padding:3px 10px;border-radius:12px;font-size:11px;font-weight:600}
+#status.connected{background:#0d3d1e;color:#3fb950;border:1px solid #238636}
+#status.disconnected{background:#3d0d0d;color:#f85149;border:1px solid #da3633}
+#status.connecting{background:#3d2e0d;color:#d29922;border:1px solid #bb8009}
+#main{display:flex;flex:1;overflow:hidden}
+#screen-panel{flex:1;display:flex;flex-direction:column;min-width:0}
+#screen-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:8px;background:#0d1117;overflow:hidden}
+#screen-wrap img{max-width:100%;max-height:100%;object-fit:contain;border-radius:4px;background:#000;box-shadow:0 0 0 1px #30363d}
+#screen-info{display:flex;justify-content:space-between;padding:4px 12px;font-size:11px;color:#484f58;border-top:1px solid #30363d;background:#161b22;flex-shrink:0}
+#fps{color:#58a6ff}
+#res{color:#8b949e}
+#file-panel{width:320px;display:flex;flex-direction:column;border-left:1px solid #30363d;background:#161b22;flex-shrink:0}
+#file-header{display:flex;align-items:center;gap:6px;padding:8px 12px;border-bottom:1px solid #30363d;font-size:12px;font-weight:600;color:#8b949e;flex-shrink:0}
+#file-header button{background:#21262d;border:1px solid #30363d;color:#c9d1d9;padding:2px 8px;border-radius:4px;cursor:pointer;font-size:11px}
+#file-header button:hover{background:#30363d}
+#file-path{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;color:#58a6ff;font-weight:400;font-size:11px;text-align:right}
+#file-list{flex:1;overflow-y:auto;padding:4px 0;font-size:13px;scrollbar-width:thin;scrollbar-color:#30363d transparent}
+#file-list::-webkit-scrollbar{width:5px}
+#file-list::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
+.entry{display:flex;align-items:center;gap:8px;padding:5px 12px;cursor:pointer;transition:background .1s;border-left:2px solid transparent}
+.entry:hover{background:#1c2128}
+.entry.selected{background:#1c2128;border-left-color:#58a6ff}
+.entry .icon{font-size:14px;width:18px;text-align:center;flex-shrink:0}
+.entry .icon.dir{color:#d29922}
+.entry .icon.file{color:#8b949e}
+.entry .name{flex:1;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.entry .size{font-size:11px;color:#484f58;flex-shrink:0}
+#bottom{display:flex;gap:8px;padding:8px 12px;border-top:1px solid #30363d;background:#1c2128;flex-shrink:0}
+#bottom input{flex:1;padding:8px 12px;border-radius:6px;border:1px solid #30363d;background:#0d1117;color:#c9d1d9;font-size:13px;outline:none}
+#bottom input:focus{border-color:#58a6ff}
+#bottom input:disabled{opacity:.5}
+#bottom button{padding:8px 16px;border-radius:6px;border:none;background:#238636;color:#fff;font-size:13px;font-weight:600;cursor:pointer}
+#bottom button:hover:not(:disabled){background:#2ea043}
+#bottom button:disabled{opacity:.5;cursor:default}
+#bottom .toggle{padding:8px 12px;border-radius:6px;border:1px solid;font-size:12px;font-weight:600;cursor:pointer;background:transparent;transition:all .2s}
+#bottom .toggle.on{border-color:#238636;color:#3fb950}
+#bottom .toggle.off{border-color:#30363d;color:#484f58}
+#bottom .toggle:hover{border-color:#58a6ff;color:#58a6ff}
+#log{max-height:120px;overflow-y:auto;padding:4px 12px;font-size:11px;color:#484f58;border-top:1px solid #30363d;background:#0d1117;flex-shrink:0;scrollbar-width:thin}
+#log::-webkit-scrollbar{width:4px}
+#log::-webkit-scrollbar-thumb{background:#30363d;border-radius:2px}
+#log div{padding:1px 0}
+#log .err{color:#f85149}
+#log .ok{color:#3fb950}
+#log .cmd{color:#58a6ff}
+.loading{text-align:center;padding:20px;color:#484f58;font-size:12px}
+.error-message{text-align:center;padding:20px;color:#f85149;font-size:12px}
+</style>
+</head>
+<body>
+<div id="topbar">
+<h1>Remote <span>Agent</span></h1>
+<span id="status" class="disconnected">Disconnected</span>
+<span style="flex:1"></span>
+<span style="font-size:11px;color:#484f58">Agent connects; viewer streams at 1 FPS</span>
+</div>
+<div id="main">
+<div id="screen-panel">
+<div id="screen-wrap">
+<img id="screen" src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='400' height='300'%3E%3Crect width='400' height='300' fill='%23161b22'/%3E%3Ctext x='200' y='150' text-anchor='middle' fill='%23484f58' font-size='14' font-family='sans-serif'%3EConnecting...%3C/text%3E%3C/svg%3E" alt="Screen">
+</div>
+<div id="screen-info">
+<span>Stream <span id="fps">—</span></span>
+<span id="res">Waiting...</span>
+</div>
+</div>
+<div id="file-panel">
+<div id="file-header">
+<button id="btn-up" title="Parent dir">&#x2191;</button>
+<span>Files</span>
+<span id="file-path">/</span>
+</div>
+<div id="file-list"><div class="loading">Connect to browse files</div></div>
+</div>
+</div>
+<div id="bottom">
+<input type="text" id="input" placeholder="Command (/help)" disabled spellcheck="false">
+<button id="send" disabled>Send</button>
+<button id="btn-stream" class="toggle on">Stream ON</button>
+</div>
+<div id="log"></div>
+
+<script>
+const AGENT_HOST = '127.0.0.1';
+const AGENT_PORT = 8080;
+const WS_URL = `ws://${AGENT_HOST}:${AGENT_PORT}`;
+const HTTP_URL = `http://${AGENT_HOST}:${AGENT_PORT}`;
+
+let ws = null;
+let reconnectTimer = null;
+let currentPath = 'C:\\';
+let streamActive = true;
+let streamInterval = null;
+let selEntry = null;
+
+const $ = id => document.getElementById(id);
+const screen = $('screen');
+const logDiv = $('log');
+const fileList = $('file-list');
+const filePath = $('file-path');
+const statusEl = $('status');
+const input = $('input');
+const sendBtn = $('send');
+const btnUp = $('btn-up');
+const btnStream = $('btn-stream');
+
+function log(msg, cls) {
+  const d = document.createElement('div');
+  if (cls) d.className = cls;
+  d.textContent = `[${new Date().toLocaleTimeString()}] ${msg}`;
+  logDiv.appendChild(d);
+  logDiv.scrollTop = logDiv.scrollHeight;
+}
+
+function setStatus(state, text) {
+  statusEl.className = state;
+  statusEl.textContent = text;
+}
+
+function updateFps() {
+  let last = 0, count = 0;
+  return function() {
+    const now = performance.now();
+    if (now - last > 1000) { $('fps').textContent = count + ' FPS'; count = 0; last = now; }
+    count++;
+  };
+}
+const fpsCounter = updateFps();
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[c]);
+}
+
+// --- Screenshot streaming ---
+function startStream() {
+  if (streamInterval) return;
+  streamActive = true;
+  btnStream.textContent = 'Stream ON';
+  btnStream.className = 'toggle on';
+  streamInterval = setInterval(() => {
+    if (!streamActive) return;
+    screen.src = `${HTTP_URL}/screenshot.jpg?t=${Date.now()}`;
+  }, 1000);
+}
+
+function stopStream() {
+  streamActive = false;
+  if (streamInterval) { clearInterval(streamInterval); streamInterval = null; }
+  btnStream.textContent = 'Stream OFF';
+  btnStream.className = 'toggle off';
+}
+
+screen.onload = () => {
+  fpsCounter();
+  const nat = screen.naturalWidth;
+  if (nat) $('res').textContent = `${screen.naturalWidth}x${screen.naturalHeight}`;
+};
+screen.onerror = () => {};
+
+// --- File browser ---
+function loadDir(path) {
+  currentPath = path;
+  filePath.textContent = path;
+  fileList.innerHTML = '<div class="loading">Loading...</div>';
+  fetch(`${HTTP_URL}/api/files?path=${encodeURIComponent(path)}`)
+    .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); })
+    .then(data => renderDir(data))
+    .catch(err => {
+      fileList.innerHTML = `<div class="error-message">Error: ${escapeHtml(err.message)}</div>`;
+      log(`File list error: ${err.message}`, 'err');
+    });
+}
+
+function renderDir(data) {
+  if (!data || !data.entries) {
+    fileList.innerHTML = '<div class="error-message">Invalid response</div>';
+    return;
+  }
+  fileList.innerHTML = '';
+  const dirs = data.entries.filter(e => e.type === 'dir');
+  const files = data.entries.filter(e => e.type === 'file');
+  const all = [...dirs, ...files];
+  if (all.length === 0) {
+    fileList.innerHTML = '<div class="loading">(empty)</div>';
+    return;
+  }
+  for (const e of all) {
+    const div = document.createElement('div');
+    div.className = 'entry';
+    const icon = document.createElement('span');
+    icon.className = `icon ${e.type === 'dir' ? 'dir' : 'file'}`;
+    icon.textContent = e.type === 'dir' ? '\u25B6' : '\u2630';
+    const name = document.createElement('span');
+    name.className = 'name';
+    name.textContent = e.name;
+    const sz = document.createElement('span');
+    sz.className = 'size';
+    sz.textContent = e.type === 'file' ? e.size_str : '';
+    div.appendChild(icon);
+    div.appendChild(name);
+    div.appendChild(sz);
+    div.addEventListener('click', () => {
+      document.querySelectorAll('.entry').forEach(el => el.classList.remove('selected'));
+      div.classList.add('selected');
+      selEntry = e;
+      if (e.type === 'dir') {
+        loadDir(currentPath.endsWith('\\') ? currentPath + e.name : currentPath + '\\' + e.name);
+      }
+    });
+    div.addEventListener('dblclick', () => {
+      if (e.type === 'file') {
+        const fullPath = (currentPath.endsWith('\\') ? currentPath : currentPath + '\\') + e.name;
+        const a = document.createElement('a');
+        a.href = `${HTTP_URL}/api/download?path=${encodeURIComponent(fullPath)}`;
+        a.download = e.name;
+        a.click();
+        log(`Downloading: ${e.name}`, 'ok');
+      }
+    });
+    fileList.appendChild(div);
+  }
+}
+
+btnUp.addEventListener('click', () => {
+  const p = currentPath.replace(/\\+$/, '');
+  const idx = p.lastIndexOf('\\');
+  if (idx > 0) loadDir(p.substring(0, idx));
+  else loadDir('C:\\');
+});
+
+// --- WebSocket commands ---
+function sendCommand() {
+  const text = input.value.trim();
+  if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+  input.value = '';
+  if (text === '/help') { ws.send(text); return; }
+  log(`> ${text}`, 'cmd');
+  ws.send(text);
+}
+
+function connect() {
+  if (ws && ws.readyState === WebSocket.OPEN) return;
+  setStatus('connecting', 'Connecting...');
+  try { ws = new WebSocket(WS_URL); }
+  catch (e) { setStatus('disconnected', 'Failed'); scheduleReconnect(); return; }
+  ws.onopen = () => {
+    setStatus('connected', 'Connected');
+    log('Connected to remote agent', 'ok');
+    input.disabled = false; sendBtn.disabled = false;
+    input.focus();
+    loadDir('C:\\');
+  };
+  ws.onmessage = (e) => {
+    log(e.data, 'ok');
+  };
+  ws.onclose = () => {
+    setStatus('disconnected', 'Disconnected');
+    log('Disconnected', 'err');
+    input.disabled = true; sendBtn.disabled = true;
+    ws = null;
+    scheduleReconnect();
+  };
+  ws.onerror = () => {
+    setStatus('disconnected', 'Error');
+    if (ws) ws.close();
+  };
+}
+
+function scheduleReconnect() {
+  if (reconnectTimer) return;
+  reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 3000);
+}
+
+input.addEventListener('keydown', e => { if (e.key === 'Enter') sendCommand(); });
+sendBtn.addEventListener('click', sendCommand);
+
+btnStream.addEventListener('click', () => {
+  if (streamActive) stopStream();
+  else startStream();
+});
+
+connect();
+startStream();
+</script>
+</body>
+</html>
