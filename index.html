@@ -14,6 +14,7 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d
 #status.connected{background:#0d3d1e;color:#3fb950;border:1px solid #238636}
 #status.disconnected{background:#3d0d0d;color:#f85149;border:1px solid #da3633}
 #status.connecting{background:#3d2e0d;color:#d29922;border:1px solid #bb8009}
+#mode-badge{padding:2px 8px;border-radius:8px;font-size:10px;font-weight:600;background:#1c2128;color:#8b949e;border:1px solid #30363d}
 #main{display:flex;flex:1;overflow:hidden}
 #screen-panel{flex:1;display:flex;flex-direction:column;min-width:0}
 #screen-wrap{flex:1;display:flex;align-items:center;justify-content:center;padding:8px;background:#0d1117;overflow:hidden}
@@ -31,7 +32,6 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d
 #file-list::-webkit-scrollbar-thumb{background:#30363d;border-radius:3px}
 .entry{display:flex;align-items:center;gap:8px;padding:5px 12px;cursor:pointer;transition:background .1s;border-left:2px solid transparent}
 .entry:hover{background:#1c2128}
-.entry.selected{background:#1c2128;border-left-color:#58a6ff}
 .entry .icon{font-size:14px;width:18px;text-align:center;flex-shrink:0}
 .entry .icon.dir{color:#d29922}
 .entry .icon.file{color:#8b949e}
@@ -48,23 +48,19 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d
 #bottom .toggle.on{border-color:#238636;color:#3fb950}
 #bottom .toggle.off{border-color:#30363d;color:#484f58}
 #bottom .toggle:hover{border-color:#58a6ff;color:#58a6ff}
-#log{max-height:120px;overflow-y:auto;padding:4px 12px;font-size:11px;color:#484f58;border-top:1px solid #30363d;background:#0d1117;flex-shrink:0;scrollbar-width:thin}
+#log{max-height:100px;overflow-y:auto;padding:4px 12px;font-size:11px;color:#484f58;border-top:1px solid #30363d;background:#0d1117;flex-shrink:0;scrollbar-width:thin}
 #log::-webkit-scrollbar{width:4px}
 #log::-webkit-scrollbar-thumb{background:#30363d;border-radius:2px}
 #log div{padding:1px 0}
-#log .err{color:#f85149}
-#log .ok{color:#3fb950}
-#log .cmd{color:#58a6ff}
 .loading{text-align:center;padding:20px;color:#484f58;font-size:12px}
-.error-message{text-align:center;padding:20px;color:#f85149;font-size:12px}
 </style>
 </head>
 <body>
 <div id="topbar">
 <h1>Remote <span>Agent</span></h1>
 <span id="status" class="disconnected">Disconnected</span>
+<span id="mode-badge">LOCAL</span>
 <span style="flex:1"></span>
-<span style="font-size:11px;color:#484f58">Agent connects; viewer streams at 1 FPS</span>
 </div>
 <div id="main">
 <div id="screen-panel">
@@ -73,12 +69,12 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d
 </div>
 <div id="screen-info">
 <span>Stream <span id="fps">—</span></span>
-<span id="res">Waiting...</span>
+<span id="res">—</span>
 </div>
 </div>
 <div id="file-panel">
 <div id="file-header">
-<button id="btn-up" title="Parent dir">&#x2191;</button>
+<button id="btn-up">&#x2191;</button>
 <span>Files</span>
 <span id="file-path">/</span>
 </div>
@@ -93,17 +89,25 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#0d1117;color:#c9d1d
 <div id="log"></div>
 
 <script>
+// ─── Config ───────────────────────────────────────────────────
+const params = new URLSearchParams(window.location.search);
+const RELAY_URL = params.get('relay') || '';
+const CHANNEL = params.get('channel') || 'default';
+const IS_RELAY = !!RELAY_URL;
 const AGENT_HOST = '127.0.0.1';
 const AGENT_PORT = 8080;
-const WS_URL = `ws://${AGENT_HOST}:${AGENT_PORT}`;
-const HTTP_URL = `http://${AGENT_HOST}:${AGENT_PORT}`;
+const WS_URL = IS_RELAY ? RELAY_URL : `ws://${AGENT_HOST}:${AGENT_PORT}`;
+const HTTP_ROOT = IS_RELAY ? null : `http://${AGENT_HOST}:${AGENT_PORT}`;
 
+// ─── State ────────────────────────────────────────────────────
 let ws = null;
 let reconnectTimer = null;
 let currentPath = 'C:\\';
 let streamActive = true;
 let streamInterval = null;
-let selEntry = null;
+let lastScreenshotTime = 0;
+let screenshotCount = 0;
+let fpsInterval = null;
 
 const $ = id => document.getElementById(id);
 const screen = $('screen');
@@ -115,6 +119,9 @@ const input = $('input');
 const sendBtn = $('send');
 const btnUp = $('btn-up');
 const btnStream = $('btn-stream');
+const modeBadge = $('mode-badge');
+
+modeBadge.textContent = IS_RELAY ? 'RELAY' : 'LOCAL';
 
 function log(msg, cls) {
   const d = document.createElement('div');
@@ -129,29 +136,30 @@ function setStatus(state, text) {
   statusEl.textContent = text;
 }
 
-function updateFps() {
-  let last = 0, count = 0;
-  return function() {
-    const now = performance.now();
-    if (now - last > 1000) { $('fps').textContent = count + ' FPS'; count = 0; last = now; }
-    count++;
-  };
-}
-const fpsCounter = updateFps();
-
-function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'})[c]);
+// ─── FPS counter ──────────────────────────────────────────────
+if (!fpsInterval) {
+  fpsInterval = setInterval(() => {
+    $('fps').textContent = screenshotCount + ' FPS';
+    screenshotCount = 0;
+  }, 1000);
 }
 
-// --- Screenshot streaming ---
-function startStream() {
+// ─── Screenshot display ───────────────────────────────────────
+function updateScreenshot(dataUrl, w, h) {
+  screen.src = dataUrl;
+  screenshotCount++;
+  if (w && h) $('res').textContent = `${w}x${h}`;
+}
+
+// In local mode, poll screenshot.jpg every second
+function startLocalStream() {
   if (streamInterval) return;
   streamActive = true;
   btnStream.textContent = 'Stream ON';
   btnStream.className = 'toggle on';
   streamInterval = setInterval(() => {
-    if (!streamActive) return;
-    screen.src = `${HTTP_URL}/screenshot.jpg?t=${Date.now()}`;
+    if (!streamActive || !HTTP_ROOT) return;
+    screen.src = `${HTTP_ROOT}/screenshot.jpg?t=${Date.now()}`;
   }, 1000);
 }
 
@@ -163,40 +171,53 @@ function stopStream() {
 }
 
 screen.onload = () => {
-  fpsCounter();
-  const nat = screen.naturalWidth;
-  if (nat) $('res').textContent = `${screen.naturalWidth}x${screen.naturalHeight}`;
+  if (!IS_RELAY) {
+    const nat = screen.naturalWidth;
+    if (nat) $('res').textContent = `${screen.naturalWidth}x${screen.naturalHeight}`;
+  }
 };
-screen.onerror = () => {};
 
-// --- File browser ---
-function loadDir(path) {
+// ─── File browser (local mode) ────────────────────────────────
+function loadLocalDir(path) {
   currentPath = path;
   filePath.textContent = path;
   fileList.innerHTML = '<div class="loading">Loading...</div>';
-  fetch(`${HTTP_URL}/api/files?path=${encodeURIComponent(path)}`)
+  fetch(`${HTTP_ROOT}/api/files?path=${encodeURIComponent(path)}`)
     .then(r => { if (!r.ok) throw new Error(r.statusText); return r.json(); })
-    .then(data => renderDir(data))
+    .then(data => renderDirEntries(data.entries))
     .catch(err => {
-      fileList.innerHTML = `<div class="error-message">Error: ${escapeHtml(err.message)}</div>`;
+      fileList.innerHTML = `<div class="loading">Error: ${err.message}</div>`;
       log(`File list error: ${err.message}`, 'err');
     });
 }
 
-function renderDir(data) {
-  if (!data || !data.entries) {
-    fileList.innerHTML = '<div class="error-message">Invalid response</div>';
-    return;
+// ─── File browser (relay mode) ────────────────────────────────
+function loadRelayDir(path) {
+  currentPath = path;
+  filePath.textContent = path;
+  fileList.innerHTML = '<div class="loading">Loading...</div>';
+  sendRaw(`/ls ${path}`);
+}
+
+function parseLsResponse(text) {
+  const lines = text.split('\n');
+  const entries = [];
+  for (const line of lines) {
+    const dirMatch = line.match(/^\s+\[DIR\]\s+(.+)/);
+    const fileMatch = line.match(/^ {8}\s+(.+?)\s*(\([^)]+\))?\s*$/);
+    if (dirMatch) entries.push({ name: dirMatch[1].trim(), type: 'dir', size_str: '' });
+    if (fileMatch) entries.push({ name: fileMatch[1].trim(), type: 'file', size_str: fileMatch[2] || '' });
   }
+  return entries;
+}
+
+function renderDirEntries(entries) {
   fileList.innerHTML = '';
-  const dirs = data.entries.filter(e => e.type === 'dir');
-  const files = data.entries.filter(e => e.type === 'file');
-  const all = [...dirs, ...files];
-  if (all.length === 0) {
+  if (!entries || entries.length === 0) {
     fileList.innerHTML = '<div class="loading">(empty)</div>';
     return;
   }
-  for (const e of all) {
+  for (const e of entries) {
     const div = document.createElement('div');
     div.className = 'entry';
     const icon = document.createElement('span');
@@ -207,25 +228,23 @@ function renderDir(data) {
     name.textContent = e.name;
     const sz = document.createElement('span');
     sz.className = 'size';
-    sz.textContent = e.type === 'file' ? e.size_str : '';
-    div.appendChild(icon);
-    div.appendChild(name);
-    div.appendChild(sz);
+    sz.textContent = e.size_str || '';
+    div.appendChild(icon); div.appendChild(name); div.appendChild(sz);
     div.addEventListener('click', () => {
       document.querySelectorAll('.entry').forEach(el => el.classList.remove('selected'));
       div.classList.add('selected');
-      selEntry = e;
       if (e.type === 'dir') {
-        loadDir(currentPath.endsWith('\\') ? currentPath + e.name : currentPath + '\\' + e.name);
+        const newPath = currentPath.endsWith('\\') ? currentPath + e.name : currentPath + '\\' + e.name;
+        if (IS_RELAY) loadRelayDir(newPath);
+        else loadLocalDir(newPath);
       }
     });
     div.addEventListener('dblclick', () => {
-      if (e.type === 'file') {
+      if (e.type === 'file' && !IS_RELAY) {
         const fullPath = (currentPath.endsWith('\\') ? currentPath : currentPath + '\\') + e.name;
         const a = document.createElement('a');
-        a.href = `${HTTP_URL}/api/download?path=${encodeURIComponent(fullPath)}`;
-        a.download = e.name;
-        a.click();
+        a.href = `${HTTP_ROOT}/api/download?path=${encodeURIComponent(fullPath)}`;
+        a.download = e.name; a.click();
         log(`Downloading: ${e.name}`, 'ok');
       }
     });
@@ -236,18 +255,74 @@ function renderDir(data) {
 btnUp.addEventListener('click', () => {
   const p = currentPath.replace(/\\+$/, '');
   const idx = p.lastIndexOf('\\');
-  if (idx > 0) loadDir(p.substring(0, idx));
-  else loadDir('C:\\');
+  if (idx > 0) {
+    const parent = p.substring(0, idx);
+    if (IS_RELAY) loadRelayDir(parent);
+    else loadLocalDir(parent);
+  } else {
+    if (IS_RELAY) loadRelayDir('C:\\');
+    else loadLocalDir('C:\\');
+  }
 });
 
-// --- WebSocket commands ---
+// ─── WebSocket communication ──────────────────────────────────
+function sendRaw(text) {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  if (IS_RELAY) {
+    ws.send(JSON.stringify({ type: 'cmd', data: text }));
+  } else {
+    ws.send(text);
+  }
+}
+
 function sendCommand() {
   const text = input.value.trim();
   if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
   input.value = '';
-  if (text === '/help') { ws.send(text); return; }
+  input.focus();
+  if (text === '/help') { sendRaw(text); return; }
   log(`> ${text}`, 'cmd');
-  ws.send(text);
+  sendRaw(text);
+}
+
+function handleMessage(data) {
+  if (IS_RELAY) {
+    try {
+      const msg = JSON.parse(data);
+      if (msg.type === 'registered') {
+        setStatus('connected', 'Connected');
+        log('Connected to relay as viewer', 'ok');
+        input.disabled = false; sendBtn.disabled = false;
+        input.focus();
+        loadRelayDir('C:\\');
+        return;
+      }
+      if (msg.type === 'screenshot') {
+        const dataUrl = 'data:image/jpeg;base64,' + msg.data;
+        updateScreenshot(dataUrl, msg.w, msg.h);
+        return;
+      }
+      if (msg.type === 'response') {
+        log(msg.data, 'ok');
+        // If this was a file list, parse and render
+        if (msg.data.startsWith('Contents of ')) {
+          const entries = parseLsResponse(msg.data);
+          renderDirEntries(entries);
+        }
+        return;
+      }
+      if (msg.type === 'files') {
+        renderDirEntries(msg.entries);
+        return;
+      }
+    } catch (e) {
+      log('Parse error: ' + e.message, 'err');
+    }
+    return;
+  }
+
+  // Local mode
+  log(data, 'ok');
 }
 
 function connect() {
@@ -255,16 +330,30 @@ function connect() {
   setStatus('connecting', 'Connecting...');
   try { ws = new WebSocket(WS_URL); }
   catch (e) { setStatus('disconnected', 'Failed'); scheduleReconnect(); return; }
+
   ws.onopen = () => {
+    if (IS_RELAY) {
+      // Register as viewer
+      ws.send(JSON.stringify({ type: 'register', role: 'viewer', channel: CHANNEL }));
+      return;
+    }
     setStatus('connected', 'Connected');
-    log('Connected to remote agent', 'ok');
+    log('Connected to local agent', 'ok');
     input.disabled = false; sendBtn.disabled = false;
     input.focus();
-    loadDir('C:\\');
+    loadLocalDir('C:\\');
   };
+
   ws.onmessage = (e) => {
-    log(e.data, 'ok');
+    if (e.data instanceof Blob) {
+      const reader = new FileReader();
+      reader.onload = () => handleMessage(reader.result);
+      reader.readAsText(e.data);
+    } else {
+      handleMessage(e.data);
+    }
   };
+
   ws.onclose = () => {
     setStatus('disconnected', 'Disconnected');
     log('Disconnected', 'err');
@@ -272,6 +361,7 @@ function connect() {
     ws = null;
     scheduleReconnect();
   };
+
   ws.onerror = () => {
     setStatus('disconnected', 'Error');
     if (ws) ws.close();
@@ -283,16 +373,22 @@ function scheduleReconnect() {
   reconnectTimer = setTimeout(() => { reconnectTimer = null; connect(); }, 3000);
 }
 
+// ─── Events ───────────────────────────────────────────────────
 input.addEventListener('keydown', e => { if (e.key === 'Enter') sendCommand(); });
 sendBtn.addEventListener('click', sendCommand);
 
 btnStream.addEventListener('click', () => {
+  if (IS_RELAY) {
+    // In relay mode, screenshots come automatically via WebSocket
+    return;
+  }
   if (streamActive) stopStream();
-  else startStream();
+  else startLocalStream();
 });
 
+// ─── Init ─────────────────────────────────────────────────────
 connect();
-startStream();
+if (!IS_RELAY) startLocalStream();
 </script>
 </body>
 </html>
